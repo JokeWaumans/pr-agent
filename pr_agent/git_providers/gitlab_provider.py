@@ -276,7 +276,8 @@ class GitLabProvider(GitProvider):
             return id_project
         try:
             return getattr(self.gl.projects.get(self.id_project), "path_with_namespace", None) or None
-        except Exception:
+        except Exception as e:
+            get_logger().warning(f"[submodule] cannot look up project path for project '{id_project}': {e}")
             return None
 
     def _url_to_project_path(self, url: str, base_project_path: str | None = None) -> str | None:
@@ -406,6 +407,8 @@ class GitLabProvider(GitProvider):
 
             if repo_url.startswith(("./", "../")) and base_project_path is None:
                 base_project_path = self._superproject_path() or ""
+                if not base_project_path:
+                    get_logger().warning("[submodule] superproject path unknown; relative submodule urls are skipped")
             proj_path = self._url_to_project_path(repo_url, base_project_path)
             if not proj_path:
                 get_logger().warning(f"[submodule] cannot parse project path from url '{repo_url}' (skip)")

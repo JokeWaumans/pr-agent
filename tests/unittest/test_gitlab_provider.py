@@ -326,6 +326,18 @@ class TestGitLabProvider:
 
         assert gitlab_provider._superproject_path() == "group/sub/repo"
 
+    def test_superproject_path_logs_lookup_failure(self, gitlab_provider):
+        gitlab_provider.id_project = "42"
+        gitlab_provider.gl.projects.get.side_effect = GitlabGetError("401 Unauthorized")
+
+        with patch("pr_agent.git_providers.gitlab_provider.get_logger") as mock_logger:
+            assert gitlab_provider._superproject_path() is None
+
+        warning = mock_logger.return_value.warning
+        warning.assert_called_once()
+        assert "42" in warning.call_args.args[0]
+        assert "401 Unauthorized" in warning.call_args.args[0]
+
     def _submodule_bump(self, path="src/lib_a"):
         return {"new_path": path, "old_path": path,
                 "diff": "-Subproject commit aaa1111\n+Subproject commit bbb2222\n",
