@@ -304,7 +304,8 @@ class GitLabProvider(GitProvider):
             if url.startswith(("./", "../")):
                 if not base_project_path:
                     return None
-                path = posixpath.normpath(posixpath.join(base_project_path.strip("/"), url))
+                rel_path = urllib.parse.urlparse(url).path
+                path = posixpath.normpath(posixpath.join(base_project_path.strip("/"), rel_path))
                 if path in (".", "..") or path.startswith("../"):
                     return None
             elif url.startswith("git@") and ":" in url:

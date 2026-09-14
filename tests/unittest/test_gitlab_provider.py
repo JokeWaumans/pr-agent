@@ -400,6 +400,9 @@ class TestGitLabProvider:
         ("../../libs/lib_a.git", "group/subgroup/nested/repo", "group/subgroup/libs/lib_a"),
         ("../lib_b.git", "group/sub/repo", "group/sub/lib_b"),
         ("./nested/lib_c.git", "group/repo", "group/repo/nested/lib_c"),
+        # Query/fragment are dropped for relative URLs just like for absolute ones.
+        ("../lib_b.git?ref=main", "group/repo", "group/lib_b"),
+        ("https://gitlab.com/group/repo.git#main", None, "group/repo"),
         # Relative URL without a superproject to resolve against.
         ("../lib_b.git", None, None),
         # Relative URL that climbs past the instance root.
