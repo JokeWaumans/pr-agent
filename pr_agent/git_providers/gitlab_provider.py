@@ -198,20 +198,30 @@ class GitLabProvider(GitProvider):
     def _get_gitmodules_map(self) -> dict[str, str]:
         """
         Return {submodule_path -> repo_url} from '.gitmodules' (best effort).
-        Tries target branch first, then source branch. Always returns text.
+        Reads the MR source branch first (it carries the submodule URLs the MR introduces, e.g. after a
+        submodule was moved), then falls back to the target branch. Always returns text.
         """
         try:
             proj = self.gl.projects.get(self.id_project)
         except Exception:
             return {}
 
+        # For fork MRs the source branch lives in the source project, not the target project.
+        source_proj = proj
+        source_project_id = getattr(self.mr, "source_project_id", None)
+        if source_project_id and str(source_project_id) != str(getattr(proj, "id", None)):
+            try:
+                source_proj = self.gl.projects.get(source_project_id)
+            except Exception:
+                source_proj = proj
+
         import base64
 
-        def _read_text(ref: str | None) -> str | None:
+        def _read_text(project, ref: str | None) -> str | None:
             if not ref:
                 return None
             try:
-                f = proj.files.get(file_path=".gitmodules", ref=ref)
+                f = project.files.get(file_path=".gitmodules", ref=ref)
             except Exception:
                 return None
 
@@ -236,8 +246,8 @@ class GitLabProvider(GitProvider):
             return None
 
         content = (
-            _read_text(getattr(self.mr, "target_branch", None))
-            or _read_text(getattr(self.mr, "source_branch", None))
+            _read_text(source_proj, getattr(self.mr, "source_branch", None))
+            or _read_text(proj, getattr(self.mr, "target_branch", None))
         )
         if not content:
             return {}

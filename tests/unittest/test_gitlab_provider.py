@@ -278,6 +278,77 @@ class TestGitLabProvider:
             "libs/b": "git@gitlab.com:b.git",
         }
 
+    @staticmethod
+    def _gitmodules_file(url, path="libs/a"):
+        file_obj = MagicMock(ProjectFile)
+        file_obj.decode.return_value = f"[submodule \"{path}\"]\n    path = {path}\n    url = {url}\n"
+        return file_obj
+
+    def test_get_gitmodules_map_prefers_source_branch(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.source_branch = "feature"
+        gitlab_provider.mr.target_branch = "main"
+        gitlab_provider.mr.source_project_id = mock_project.id
+        mock_project.files.get.side_effect = lambda file_path, ref: {
+            "feature": self._gitmodules_file("../new/a.git"),
+            "main": self._gitmodules_file("../old/a.git"),
+        }[ref]
+        gitlab_provider.gl.projects.get.return_value = mock_project
+
+        assert gitlab_provider._get_gitmodules_map() == {"libs/a": "../new/a.git"}
+
+    def test_get_gitmodules_map_falls_back_to_target_branch(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.source_branch = "feature"
+        gitlab_provider.mr.target_branch = "main"
+        gitlab_provider.mr.source_project_id = mock_project.id
+
+        def _files_get(file_path, ref):
+            if ref == "main":
+                return self._gitmodules_file("../old/a.git")
+            raise GitlabGetError("404 File Not Found")
+
+        mock_project.files.get.side_effect = _files_get
+        gitlab_provider.gl.projects.get.return_value = mock_project
+
+        assert gitlab_provider._get_gitmodules_map() == {"libs/a": "../old/a.git"}
+
+    def test_get_gitmodules_map_reads_fork_source_project(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.source_branch = "feature"
+        gitlab_provider.mr.target_branch = "main"
+        gitlab_provider.mr.source_project_id = 99
+        mock_project.id = 1
+        fork = MagicMock()
+        fork.id = 99
+        fork.files.get.return_value = self._gitmodules_file("../fork/a.git")
+        mock_project.files.get.return_value = self._gitmodules_file("../old/a.git")
+        gitlab_provider.gl.projects.get.side_effect = lambda pid, **kw: fork if str(pid) == "99" else mock_project
+
+        assert gitlab_provider._get_gitmodules_map() == {"libs/a": "../fork/a.git"}
+        fork.files.get.assert_called_once_with(file_path=".gitmodules", ref="feature")
+        mock_project.files.get.assert_not_called()
+
+    def test_expand_submodule_changes_uses_source_branch_url(self, gitlab_provider, mock_project):
+        gitlab_provider.id_project = "group/repo"
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.source_branch = "feature"
+        gitlab_provider.mr.target_branch = "main"
+        gitlab_provider.mr.source_project_id = mock_project.id
+        mock_project.files.get.side_effect = lambda file_path, ref: {
+            "feature": self._gitmodules_file("../new/a.git", path="src/lib_a"),
+            "main": self._gitmodules_file("../old/a.git", path="src/lib_a"),
+        }[ref]
+        gitlab_provider.gl.projects.get.return_value = mock_project
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {"GITLAB.EXPAND_SUBMODULE_DIFFS": True}.get(key, default)
+
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings), \
+             patch.object(gitlab_provider, "_compare_submodule", return_value=[]) as m_cmp:
+            gitlab_provider._expand_submodule_changes([self._submodule_bump()])
+
+        m_cmp.assert_called_once_with("group/new/a", "aaa1111", "bbb2222")
+
     def test_project_by_path_requires_exact_match(self, gitlab_provider):
         gitlab_provider.gl.projects.get.reset_mock()
         gitlab_provider.gl.projects.get.side_effect = Exception("not found")
