@@ -206,19 +206,22 @@ class GitLabProvider(GitProvider):
         except Exception:
             return {}
 
-        # For fork MRs the source branch lives in the source project, not the target project.
+        # For fork MRs the source branch lives in the source project, not the target project. If that
+        # project cannot be fetched, skip the source read rather than looking the fork's branch name up in
+        # the target project, where a same-named branch would yield unrelated '.gitmodules' content.
         source_proj = proj
         source_project_id = getattr(self.mr, "source_project_id", None)
         if source_project_id and str(source_project_id) != str(getattr(proj, "id", None)):
             try:
                 source_proj = self.gl.projects.get(source_project_id)
-            except Exception:
-                source_proj = proj
+            except Exception as e:
+                get_logger().warning(f"[submodule] cannot fetch source project '{source_project_id}': {e}")
+                source_proj = None
 
         import base64
 
         def _read_text(project, ref: str | None) -> str | None:
-            if not ref:
+            if project is None or not ref:
                 return None
             try:
                 f = project.files.get(file_path=".gitmodules", ref=ref)

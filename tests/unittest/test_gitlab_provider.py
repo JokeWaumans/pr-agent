@@ -329,6 +329,31 @@ class TestGitLabProvider:
         fork.files.get.assert_called_once_with(file_path=".gitmodules", ref="feature")
         mock_project.files.get.assert_not_called()
 
+    def test_get_gitmodules_map_failed_fork_lookup_skips_source_read(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.source_branch = "feature"
+        gitlab_provider.mr.target_branch = "main"
+        gitlab_provider.mr.source_project_id = 99
+        mock_project.id = 1
+        # The target project happens to have a branch named like the fork's source branch.
+        mock_project.files.get.side_effect = lambda file_path, ref: {
+            "feature": self._gitmodules_file("../unrelated/a.git"),
+            "main": self._gitmodules_file("../old/a.git"),
+        }[ref]
+
+        def _projects_get(pid, **kw):
+            if str(pid) == "99":
+                raise GitlabGetError("404 Project Not Found")
+            return mock_project
+
+        gitlab_provider.gl.projects.get.side_effect = _projects_get
+
+        with patch("pr_agent.git_providers.gitlab_provider.get_logger") as mock_logger:
+            assert gitlab_provider._get_gitmodules_map() == {"libs/a": "../old/a.git"}
+
+        mock_project.files.get.assert_called_once_with(file_path=".gitmodules", ref="main")
+        assert "99" in mock_logger.return_value.warning.call_args.args[0]
+
     def test_expand_submodule_changes_uses_source_branch_url(self, gitlab_provider, mock_project):
         gitlab_provider.id_project = "group/repo"
         gitlab_provider.mr = MagicMock()
