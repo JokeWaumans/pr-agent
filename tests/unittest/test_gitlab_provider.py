@@ -284,11 +284,34 @@ class TestGitLabProvider:
         file_obj.decode.return_value = f"[submodule \"{path}\"]\n    path = {path}\n    url = {url}\n"
         return file_obj
 
-    def test_get_gitmodules_map_prefers_source_branch(self, gitlab_provider, mock_project):
-        gitlab_provider.mr = MagicMock()
-        gitlab_provider.mr.source_branch = "feature"
-        gitlab_provider.mr.target_branch = "main"
-        gitlab_provider.mr.source_project_id = mock_project.id
+    @staticmethod
+    def _mr(diff_refs=None, source_project_id=1):
+        mr = MagicMock()
+        mr.source_branch = "feature"
+        mr.target_branch = "main"
+        mr.diff_refs = diff_refs
+        mr.source_project_id = source_project_id
+        return mr
+
+    def test_get_gitmodules_map_reads_mr_head_sha(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = self._mr(diff_refs={"head_sha": "h1", "base_sha": "b1"}, source_project_id=99)
+        mock_project.id = 1
+        # The source branch moved on since the MR diff was fetched; its content must not be used.
+        mock_project.files.get.side_effect = lambda file_path, ref: {
+            "h1": self._gitmodules_file("../new/a.git"),
+            "feature": self._gitmodules_file("../newer/a.git"),
+            "b1": self._gitmodules_file("../old/a.git"),
+            "main": self._gitmodules_file("../old/a.git"),
+        }[ref]
+        gitlab_provider.gl.projects.get.return_value = mock_project
+
+        assert gitlab_provider._get_gitmodules_map() == {"libs/a": "../new/a.git"}
+        mock_project.files.get.assert_called_once_with(file_path=".gitmodules", ref="h1")
+        # The fork project is not looked up when the head commit could be read from the target project.
+        assert all(call.args[0] != 99 for call in gitlab_provider.gl.projects.get.call_args_list)
+
+    def test_get_gitmodules_map_falls_back_to_source_branch_without_diff_refs(self, gitlab_provider, mock_project):
+        gitlab_provider.mr = self._mr(diff_refs=None, source_project_id=mock_project.id)
         mock_project.files.get.side_effect = lambda file_path, ref: {
             "feature": self._gitmodules_file("../new/a.git"),
             "main": self._gitmodules_file("../old/a.git"),
@@ -297,27 +320,27 @@ class TestGitLabProvider:
 
         assert gitlab_provider._get_gitmodules_map() == {"libs/a": "../new/a.git"}
 
-    def test_get_gitmodules_map_falls_back_to_target_branch(self, gitlab_provider, mock_project):
-        gitlab_provider.mr = MagicMock()
-        gitlab_provider.mr.source_branch = "feature"
-        gitlab_provider.mr.target_branch = "main"
-        gitlab_provider.mr.source_project_id = mock_project.id
+    @pytest.mark.parametrize("available_ref,expected", [
+        ("b1", "../base/a.git"),
+        ("main", "../old/a.git"),
+    ])
+    def test_get_gitmodules_map_falls_back_to_base_sha_then_target_branch(self, gitlab_provider, mock_project,
+                                                                          available_ref, expected):
+        gitlab_provider.mr = self._mr(diff_refs={"head_sha": "h1", "base_sha": "b1"}, source_project_id=mock_project.id)
+        files = {"b1": "../base/a.git", "main": "../old/a.git"}
 
         def _files_get(file_path, ref):
-            if ref == "main":
-                return self._gitmodules_file("../old/a.git")
+            if ref == available_ref:
+                return self._gitmodules_file(files[ref])
             raise GitlabGetError("404 File Not Found")
 
         mock_project.files.get.side_effect = _files_get
         gitlab_provider.gl.projects.get.return_value = mock_project
 
-        assert gitlab_provider._get_gitmodules_map() == {"libs/a": "../old/a.git"}
+        assert gitlab_provider._get_gitmodules_map() == {"libs/a": expected}
 
     def test_get_gitmodules_map_reads_fork_source_project(self, gitlab_provider, mock_project):
-        gitlab_provider.mr = MagicMock()
-        gitlab_provider.mr.source_branch = "feature"
-        gitlab_provider.mr.target_branch = "main"
-        gitlab_provider.mr.source_project_id = 99
+        gitlab_provider.mr = self._mr(diff_refs=None, source_project_id=99)
         mock_project.id = 1
         fork = MagicMock()
         fork.id = 99
@@ -330,10 +353,7 @@ class TestGitLabProvider:
         mock_project.files.get.assert_not_called()
 
     def test_get_gitmodules_map_failed_fork_lookup_skips_source_read(self, gitlab_provider, mock_project):
-        gitlab_provider.mr = MagicMock()
-        gitlab_provider.mr.source_branch = "feature"
-        gitlab_provider.mr.target_branch = "main"
-        gitlab_provider.mr.source_project_id = 99
+        gitlab_provider.mr = self._mr(diff_refs=None, source_project_id=99)
         mock_project.id = 1
         # The target project happens to have a branch named like the fork's source branch.
         mock_project.files.get.side_effect = lambda file_path, ref: {
@@ -354,14 +374,11 @@ class TestGitLabProvider:
         mock_project.files.get.assert_called_once_with(file_path=".gitmodules", ref="main")
         assert "99" in mock_logger.return_value.warning.call_args.args[0]
 
-    def test_expand_submodule_changes_uses_source_branch_url(self, gitlab_provider, mock_project):
+    def test_expand_submodule_changes_uses_mr_head_url(self, gitlab_provider, mock_project):
         gitlab_provider.id_project = "group/repo"
-        gitlab_provider.mr = MagicMock()
-        gitlab_provider.mr.source_branch = "feature"
-        gitlab_provider.mr.target_branch = "main"
-        gitlab_provider.mr.source_project_id = mock_project.id
+        gitlab_provider.mr = self._mr(diff_refs={"head_sha": "h1", "base_sha": "b1"}, source_project_id=mock_project.id)
         mock_project.files.get.side_effect = lambda file_path, ref: {
-            "feature": self._gitmodules_file("../new/a.git", path="src/lib_a"),
+            "h1": self._gitmodules_file("../new/a.git", path="src/lib_a"),
             "main": self._gitmodules_file("../old/a.git", path="src/lib_a"),
         }[ref]
         gitlab_provider.gl.projects.get.return_value = mock_project

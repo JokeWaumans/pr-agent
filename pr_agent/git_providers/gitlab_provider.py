@@ -198,25 +198,30 @@ class GitLabProvider(GitProvider):
     def _get_gitmodules_map(self) -> dict[str, str]:
         """
         Return {submodule_path -> repo_url} from '.gitmodules' (best effort).
-        Reads the MR source branch first (it carries the submodule URLs the MR introduces, e.g. after a
-        submodule was moved), then falls back to the target branch. Always returns text.
+        Reads the MR head commit first (it carries the submodule URLs the MR introduces, e.g. after a
+        submodule was moved), then falls back to the source branch, the MR base commit and the target
+        branch. Always returns text.
         """
         try:
             proj = self.gl.projects.get(self.id_project)
         except Exception:
             return {}
 
-        # For fork MRs the source branch lives in the source project, not the target project. If that
-        # project cannot be fetched, skip the source read rather than looking the fork's branch name up in
-        # the target project, where a same-named branch would yield unrelated '.gitmodules' content.
-        source_proj = proj
-        source_project_id = getattr(self.mr, "source_project_id", None)
-        if source_project_id and str(source_project_id) != str(getattr(proj, "id", None)):
+        diff_refs = getattr(self.mr, "diff_refs", None)
+        diff_refs = diff_refs if isinstance(diff_refs, dict) else {}
+
+        def _source_project():
+            # For fork MRs the source branch lives in the source project, not the target project. If that
+            # project cannot be fetched, skip the source read rather than looking the fork's branch name up
+            # in the target project, where a same-named branch would yield unrelated '.gitmodules' content.
+            source_project_id = getattr(self.mr, "source_project_id", None)
+            if not source_project_id or str(source_project_id) == str(getattr(proj, "id", None)):
+                return proj
             try:
-                source_proj = self.gl.projects.get(source_project_id)
+                return self.gl.projects.get(source_project_id)
             except Exception as e:
                 get_logger().warning(f"[submodule] cannot fetch source project '{source_project_id}': {e}")
-                source_proj = None
+                return None
 
         import base64
 
@@ -248,8 +253,12 @@ class GitLabProvider(GitProvider):
 
             return None
 
+        # The MR head SHA is immutable (unlike the branch, which may be force-pushed meanwhile) and is
+        # reachable in the target project also for fork MRs (refs/merge-requests/<iid>/head).
         content = (
-            _read_text(source_proj, getattr(self.mr, "source_branch", None))
+            _read_text(proj, diff_refs.get("head_sha"))
+            or _read_text(_source_project(), getattr(self.mr, "source_branch", None))
+            or _read_text(proj, diff_refs.get("base_sha"))
             or _read_text(proj, getattr(self.mr, "target_branch", None))
         )
         if not content:
