@@ -295,6 +295,72 @@ class TestGitLabProvider:
         assert list_kwargs["membership"] is True
         assert all(call.args[0] != fake.id for call in gitlab_provider.gl.projects.get.call_args_list)
 
+    @pytest.mark.parametrize("url,base,expected", [
+        ("https://gitlab.com/group/repo.git", None, "group/repo"),
+        ("git@gitlab.com:group/sub/repo.git", None, "group/sub/repo"),
+        ("ssh://git@gitlab.com/group/repo.git", None, "group/repo"),
+        # Relative URLs resolve against the superproject path.
+        ("../../../../libs/lib_a.git", "group/subgroup/nested/repo", "libs/lib_a"),
+        ("../../libs/lib_a.git", "group/subgroup/nested/repo", "group/subgroup/libs/lib_a"),
+        ("../lib_b.git", "group/sub/repo", "group/sub/lib_b"),
+        ("./nested/lib_c.git", "group/repo", "group/repo/nested/lib_c"),
+        # Relative URL without a superproject to resolve against.
+        ("../lib_b.git", None, None),
+        # Relative URL that climbs past the instance root.
+        ("../../../lib_b.git", "group/repo", None),
+    ])
+    def test_url_to_project_path(self, gitlab_provider, url, base, expected):
+        assert gitlab_provider._url_to_project_path(url, base) == expected
+
+    def test_superproject_path_prefers_id_project_path(self, gitlab_provider):
+        gitlab_provider.id_project = "group/sub/repo"
+        gitlab_provider.gl.projects.get.reset_mock()
+
+        assert gitlab_provider._superproject_path() == "group/sub/repo"
+        gitlab_provider.gl.projects.get.assert_not_called()
+
+    def test_superproject_path_resolves_numeric_project_id(self, gitlab_provider, mock_project):
+        gitlab_provider.id_project = "42"
+        mock_project.path_with_namespace = "group/sub/repo"
+        gitlab_provider.gl.projects.get.return_value = mock_project
+
+        assert gitlab_provider._superproject_path() == "group/sub/repo"
+
+    def _submodule_bump(self, path="src/lib_a"):
+        return {"new_path": path, "old_path": path,
+                "diff": "-Subproject commit aaa1111\n+Subproject commit bbb2222\n",
+                "new_file": False, "deleted_file": False, "renamed_file": False}
+
+    def test_expand_submodule_changes_resolves_relative_url(self, gitlab_provider):
+        gitlab_provider.id_project = "group/subgroup/nested/repo"
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {"GITLAB.EXPAND_SUBMODULE_DIFFS": True}.get(key, default)
+        sub_diffs = [{"old_path": "src/a.c", "new_path": "src/a.c", "diff": "@@ -1 +1 @@\n-x\n+y\n"}]
+
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings), \
+             patch.object(gitlab_provider, "_get_gitmodules_map",
+                          return_value={"src/lib_a": "../../../../libs/lib_a.git"}), \
+             patch.object(gitlab_provider, "_compare_submodule", return_value=sub_diffs) as m_cmp:
+            out = gitlab_provider._expand_submodule_changes([self._submodule_bump()])
+
+        m_cmp.assert_called_once_with("libs/lib_a", "aaa1111", "bbb2222")
+        assert [c["new_path"] for c in out] == ["src/lib_a", "src/lib_a/src/a.c"]
+
+    def test_expand_submodule_changes_skips_unresolvable_relative_url(self, gitlab_provider):
+        gitlab_provider.id_project = "group/repo"
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {"GITLAB.EXPAND_SUBMODULE_DIFFS": True}.get(key, default)
+        changes = [self._submodule_bump()]
+
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings), \
+             patch.object(gitlab_provider, "_get_gitmodules_map",
+                          return_value={"src/lib_a": "../../../libs/lib_a.git"}), \
+             patch.object(gitlab_provider, "_compare_submodule") as m_cmp:
+            out = gitlab_provider._expand_submodule_changes(changes)
+
+        m_cmp.assert_not_called()
+        assert out == changes
+
     def test_compare_submodule_cached(self, gitlab_provider):
         proj = MagicMock()
         proj.repository_compare.return_value = {"diffs": [{"diff": "d"}]}
