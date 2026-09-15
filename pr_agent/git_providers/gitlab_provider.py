@@ -38,6 +38,7 @@ from .git_provider import (
     MAX_FILES_ALLOWED_FULL,
     GitProvider,
     IncrementalPR,
+    get_config_branch,
     redact_credentials,
 )
 
@@ -1513,30 +1514,50 @@ class GitLabProvider(GitProvider):
         if global_settings:
             settings_files.append(("global", global_settings))
         try:
-            main_branch = self.gl.projects.get(self.id_project).default_branch
-            contents = self.gl.projects.get(self.id_project).files.get(file_path='.pr_agent.toml', ref=main_branch).decode()
+            project = self.gl.projects.get(self.id_project)
+            contents = None
+            config_branch = get_config_branch()
+            if config_branch:
+                try:
+                    contents = project.files.get(file_path='.pr_agent.toml', ref=config_branch).decode()
+                    self._resolved_config_branch = config_branch
+                except GitlabGetError as e:
+                    # Only a missing branch/file (404) is an expected reason to fall back to the
+                    # default branch; other errors propagate so they are not masked by a fallback
+                    # that could apply unintended settings.
+                    if getattr(e, "response_code", None) != 404:
+                        raise
+                    get_logger().debug(
+                        f"No .pr_agent.toml on branch '{config_branch}', falling back to default branch")
+            if contents is None:
+                main_branch = project.default_branch
+                contents = project.files.get(file_path='.pr_agent.toml', ref=main_branch).decode()
+                self._resolved_config_branch = main_branch or ""
             if contents:
                 settings_files.append(("local", contents))
-        except GitlabGetError:
-            pass  # a missing local .pr_agent.toml is expected
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                pass  # a missing local .pr_agent.toml is expected
+            else:
+                get_logger().warning(f"Failed to load local .pr_agent.toml file, error: {e}")
         except Exception as e:
             get_logger().warning(f"Failed to load local .pr_agent.toml file, error: {e}")
         return settings_files if settings_files else ""
 
     def get_repo_settings_tree(self, ref: str = "") -> tuple[list[str], str]:
-        """Recursively list every `.pr_agent.toml` at the repository default branch.
+        """Recursively list every `.pr_agent.toml` at *ref* ("" = default branch).
 
-        GitLab root config is always read from the project default branch; the
-        per-directory layer follows the same branch so nested configs cannot read
-        a branch that the root does not use.  ``ref`` is accepted for interface
-        compatibility but ignored — a future follow-up could add CONFIG_BRANCH
-        support here.
+        Follows the same branch resolution as get_repo_settings(): when the root
+        lookup resolved a config, the tree is read from that same branch
+        (``_resolved_config_branch``) so nested configs cannot come from a branch
+        the root does not use. Otherwise *ref* is used, falling back to the project
+        default branch when it is empty.
         """
         if not getattr(self, "gl", None) or not getattr(self, "id_project", None):
             return [], ""
         try:
             project = self.gl.projects.get(self.id_project)
-            resolved_ref = project.default_branch
+            resolved_ref = getattr(self, "_resolved_config_branch", "") or ref or project.default_branch
             max_pages = get_settings().config.per_directory_settings_max_tree_pages
             if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1:
                 get_logger().warning("Invalid per-directory tree page limit; skipping nested settings")
