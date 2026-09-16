@@ -1550,24 +1550,32 @@ class GitLabProvider(GitProvider):
         Follows the same branch resolution as get_repo_settings(): when the root
         lookup resolved a config, the tree is read from that same branch
         (``_resolved_config_branch``) so nested configs cannot come from a branch
-        the root does not use. Otherwise *ref* is used, falling back to the project
-        default branch when it is empty or when its tree does not exist (404), so a
-        stale config branch does not hide nested configs on the default branch.
+        the root does not use; if that tree has vanished since (404), skip nested
+        configs rather than mixing in another branch. Otherwise *ref* is used,
+        falling back to the project default branch when it is empty or when its
+        tree does not exist (404), so a stale config branch does not hide nested
+        configs on the default branch.
         """
         if not getattr(self, "gl", None) or not getattr(self, "id_project", None):
             return [], ""
         project = self.gl.projects.get(self.id_project)
-        resolved_ref = getattr(self, "_resolved_config_branch", "") or ref or project.default_branch
+        root_branch = getattr(self, "_resolved_config_branch", "")
+        resolved_ref = root_branch or ref or project.default_branch
         try:
             return self._list_config_tree_paths(project, resolved_ref), resolved_ref
         except GitlabGetError as e:
             if getattr(e, "response_code", None) != 404:
                 raise
+            if root_branch:
+                get_logger().debug(
+                    f"No repository tree for branch '{resolved_ref}' that supplied the root .pr_agent.toml; "
+                    "skipping per-directory settings instead of reading them from another branch")
+                return [], ""
             if resolved_ref == project.default_branch:
                 get_logger().debug("No repository tree found for per-directory settings; skipping")
                 return [], ""
-        # Match the root config fallback: a missing branch/tree is an expected reason to retry
-        # the default branch; other errors propagate so they are not masked by a silent downgrade.
+        # Match the root config fallback for a caller-provided branch hint: a missing branch/tree is an
+        # expected reason to retry the default branch; other errors propagate so they are not masked.
         get_logger().debug(
             f"No repository tree for branch '{resolved_ref}' while listing per-directory settings; "
             "falling back to default branch")

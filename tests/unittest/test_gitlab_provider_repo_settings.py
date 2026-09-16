@@ -189,3 +189,17 @@ def test_get_repo_settings_tree_does_not_retry_on_non_404_error(project):
         provider.get_repo_settings_tree("feature-config")
 
     project.repository_tree.assert_called_once()
+
+
+def test_get_repo_settings_tree_skips_nested_settings_when_resolved_root_branch_vanished(project):
+    project.repository_tree.side_effect = GitlabGetError("404 Tree Not Found", response_code=404)
+    provider = _provider_with_project(project)
+    provider._resolved_config_branch = "feature-config"
+    settings = MagicMock()
+    settings.config.per_directory_settings_max_tree_pages = 2
+
+    with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings):
+        paths, resolved_ref = provider.get_repo_settings_tree("feature-config")
+
+    assert (paths, resolved_ref) == ([], "")
+    project.repository_tree.assert_called_once_with(ref="feature-config", recursive=True, page=1, per_page=100)
