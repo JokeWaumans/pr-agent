@@ -24,10 +24,10 @@ from pr_agent.log import get_logger
 
 
 def get_config_branch() -> str:
-    """Branch the repo `.pr_agent.toml` is read from, or "" for the provider default branch.
+    """Return the branch to read the repo `.pr_agent.toml` from, or "" for the provider default branch.
 
-    CONFIG.CONFIG_BRANCH (set by the CLI `--config-branch` flag) wins over the
-    PR_AGENT_CONFIG_BRANCH environment variable; whitespace-only values are ignored.
+    Prefer CONFIG.CONFIG_BRANCH (set by the CLI `--config-branch` flag) over the
+    PR_AGENT_CONFIG_BRANCH environment variable and ignore whitespace-only values.
     """
     settings_branch = get_settings().get("CONFIG.CONFIG_BRANCH", None)
     settings_branch = settings_branch.strip() if isinstance(settings_branch, str) else ""

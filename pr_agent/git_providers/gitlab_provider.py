@@ -1522,9 +1522,9 @@ class GitLabProvider(GitProvider):
                     contents = project.files.get(file_path='.pr_agent.toml', ref=config_branch).decode()
                     self._resolved_config_branch = config_branch
                 except GitlabGetError as e:
-                    # Only a missing branch/file (404) is an expected reason to fall back to the
-                    # default branch; other errors propagate so they are not masked by a fallback
-                    # that could apply unintended settings.
+                    # Fall back to the default branch only for a missing branch/file (404); let
+                    # other errors propagate so a fallback cannot mask them and apply unintended
+                    # settings.
                     if getattr(e, "response_code", None) != 404:
                         raise
                     get_logger().debug(

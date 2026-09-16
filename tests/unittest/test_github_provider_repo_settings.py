@@ -15,7 +15,7 @@ def _provider_with_repo(repo_obj):
 
 @pytest.fixture(autouse=True)
 def no_global_settings():
-    # get_config_branch() lives in git_provider, so get_settings is patched there; keep the
+    # Patch get_settings in git_provider, where get_config_branch() lives, and keep the
     # namespace-wide lookup out of the way so that patch does not leak into it.
     with patch.object(GithubProvider, "_get_global_repo_settings", return_value=""):
         yield
