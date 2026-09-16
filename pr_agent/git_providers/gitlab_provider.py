@@ -1537,7 +1537,7 @@ class GitLabProvider(GitProvider):
                 settings_files.append(("local", contents))
         except GitlabGetError as e:
             if getattr(e, "response_code", None) == 404:
-                pass  # a missing local .pr_agent.toml is expected
+                get_logger().debug("No local .pr_agent.toml found; using existing settings")
             else:
                 get_logger().warning(f"Failed to load local .pr_agent.toml file, error: {e}")
         except Exception as e:
