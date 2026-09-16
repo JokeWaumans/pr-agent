@@ -147,3 +147,45 @@ def test_get_repo_settings_tree_defaults_to_default_branch(project):
 
     assert (paths, resolved_ref) == ([], "main")
     project.repository_tree.assert_called_once_with(ref="main", recursive=True, page=1, per_page=100)
+
+
+def test_get_repo_settings_tree_retries_default_branch_when_explicit_ref_is_missing(project):
+    project.repository_tree.side_effect = [
+        GitlabGetError("404 Tree Not Found", response_code=404),
+        [{"type": "blob", "path": "sub/.pr_agent.toml"}],
+    ]
+    provider = _provider_with_project(project)
+    settings = MagicMock()
+    settings.config.per_directory_settings_max_tree_pages = 2
+
+    with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings):
+        paths, resolved_ref = provider.get_repo_settings_tree("deleted-branch")
+
+    assert (paths, resolved_ref) == (["sub/.pr_agent.toml"], "main")
+    assert [c.kwargs["ref"] for c in project.repository_tree.call_args_list] == ["deleted-branch", "main"]
+
+
+def test_get_repo_settings_tree_returns_empty_when_default_branch_tree_is_missing_too(project):
+    project.repository_tree.side_effect = GitlabGetError("404 Tree Not Found", response_code=404)
+    provider = _provider_with_project(project)
+    settings = MagicMock()
+    settings.config.per_directory_settings_max_tree_pages = 2
+
+    with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings):
+        paths, resolved_ref = provider.get_repo_settings_tree("deleted-branch")
+
+    assert (paths, resolved_ref) == ([], "")
+    assert [c.kwargs["ref"] for c in project.repository_tree.call_args_list] == ["deleted-branch", "main"]
+
+
+def test_get_repo_settings_tree_does_not_retry_on_non_404_error(project):
+    project.repository_tree.side_effect = GitlabGetError("403 Forbidden", response_code=403)
+    provider = _provider_with_project(project)
+    settings = MagicMock()
+    settings.config.per_directory_settings_max_tree_pages = 2
+
+    with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings), \
+            pytest.raises(GitlabGetError):
+        provider.get_repo_settings_tree("feature-config")
+
+    project.repository_tree.assert_called_once()

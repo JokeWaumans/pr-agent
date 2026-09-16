@@ -1551,34 +1551,59 @@ class GitLabProvider(GitProvider):
         lookup resolved a config, the tree is read from that same branch
         (``_resolved_config_branch``) so nested configs cannot come from a branch
         the root does not use. Otherwise *ref* is used, falling back to the project
-        default branch when it is empty.
+        default branch when it is empty or when its tree does not exist (404), so a
+        stale config branch does not hide nested configs on the default branch.
         """
         if not getattr(self, "gl", None) or not getattr(self, "id_project", None):
             return [], ""
+        project = self.gl.projects.get(self.id_project)
+        resolved_ref = getattr(self, "_resolved_config_branch", "") or ref or project.default_branch
         try:
-            project = self.gl.projects.get(self.id_project)
-            resolved_ref = getattr(self, "_resolved_config_branch", "") or ref or project.default_branch
-            max_pages = get_settings().config.per_directory_settings_max_tree_pages
-            if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1:
-                get_logger().warning("Invalid per-directory tree page limit; skipping nested settings")
-                return [], resolved_ref
-            paths = []
-            for page in range(1, max_pages + 1):
-                tree = project.repository_tree(ref=resolved_ref, recursive=True, page=page, per_page=100)
-                paths.extend(
-                    item["path"] for item in tree
-                    if item.get("type") == "blob"
-                    and (item.get("path") or "").split("/")[-1] == ".pr_agent.toml"
-                )
-                if len(tree) < 100:
-                    return paths, resolved_ref
-            get_logger().warning("Per-directory tree page limit reached; skipping incomplete nested settings discovery")
-            return [], resolved_ref
+            return self._list_config_tree_paths(project, resolved_ref), resolved_ref
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) != 404:
+                raise
+            if resolved_ref == project.default_branch:
+                get_logger().debug("No repository tree found for per-directory settings; skipping")
+                return [], ""
+        # Match the root config fallback: a missing branch/tree is an expected reason to retry
+        # the default branch; other errors propagate so they are not masked by a silent downgrade.
+        get_logger().debug(
+            f"No repository tree for branch '{resolved_ref}' while listing per-directory settings; "
+            "falling back to default branch")
+        resolved_ref = project.default_branch
+        try:
+            return self._list_config_tree_paths(project, resolved_ref), resolved_ref
         except GitlabGetError as e:
             if getattr(e, "response_code", None) == 404:
                 get_logger().debug("No repository tree found for per-directory settings; skipping")
                 return [], ""
             raise
+
+    @staticmethod
+    def _list_config_tree_paths(project, ref: str) -> list[str]:
+        """Return the `.pr_agent.toml` blob paths of the recursive tree at *ref*, paginated.
+
+        Give up with a warning (and no paths) when the tree needs more pages than
+        ``per_directory_settings_max_tree_pages`` allows, rather than applying an
+        incomplete subset of nested configs.
+        """
+        max_pages = get_settings().config.per_directory_settings_max_tree_pages
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1:
+            get_logger().warning("Invalid per-directory tree page limit; skipping nested settings")
+            return []
+        paths = []
+        for page in range(1, max_pages + 1):
+            tree = project.repository_tree(ref=ref, recursive=True, page=page, per_page=100)
+            paths.extend(
+                item["path"] for item in tree
+                if item.get("type") == "blob"
+                and (item.get("path") or "").split("/")[-1] == ".pr_agent.toml"
+            )
+            if len(tree) < 100:
+                return paths
+        get_logger().warning("Per-directory tree page limit reached; skipping incomplete nested settings discovery")
+        return []
 
     def get_repo_settings_contents(self, paths: list[str], ref: str) -> dict[str, bytes]:
         """Fetch raw content of per-directory settings files at *ref*."""
