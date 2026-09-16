@@ -34,6 +34,7 @@ def get_config_branch() -> str:
     env_branch = (os.environ.get("PR_AGENT_CONFIG_BRANCH") or "").strip()
     return settings_branch or env_branch
 
+
 MAX_FILES_ALLOWED_FULL = 50
 
 _URL_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]{0,30}://)[^/@\s]+@")
