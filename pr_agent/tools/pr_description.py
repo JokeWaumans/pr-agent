@@ -24,7 +24,7 @@ from pr_agent.algo.repo_context import build_repo_context
 from pr_agent.algo.run_details import init_run_details, record_command_failure
 from pr_agent.algo.run_output import push_outputs, show_relevant_configurations, show_run_details
 from pr_agent.algo.skills_loader import get_skills_context
-from pr_agent.algo.token_budget import AttemptTokenBudget
+from pr_agent.algo.token_budget import AttemptTokenBudget, clip_tokens
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import (
     ModelType,
@@ -64,7 +64,8 @@ def _marker_block_re(name: str) -> re.Pattern:
     return re.compile(rf"<!--\s*pr_agent:{name}:start\s*-->.*?<!--\s*pr_agent:{name}:end\s*-->", re.DOTALL)
 
 
-_DELIMITER_LIKE_RE = re.compile(r"<!--\s*pr_agent:\w+:(?:start|end)\s*-->")
+_DELIMITER_LIKE_RE = re.compile(r"<!--\s*pr_agent:\w+(?::(?:start|end))?\s*-->")
+_ANY_MARKER_BLOCK_RE = re.compile(r"<!--\s*pr_agent:\w+:start\s*-->.*?<!--\s*pr_agent:\w+:end\s*-->", re.DOTALL)
 
 
 def _bare_marker_re(name: str) -> re.Pattern:
@@ -73,8 +74,10 @@ def _bare_marker_re(name: str) -> re.Pattern:
 
 
 def _wrap_marker_block(name: str, content: str) -> str:
-    """Wrap `content` in the start/end delimiter comments, dropping any delimiter-like comment it quotes so the
-    block still ends at its real delimiter on the next refresh."""
+    """Wrap `content` in the start/end delimiter comments.
+
+    Drop any marker comment the content quotes: a delimiter-like one would end the block early on the next
+    refresh, and a bare `<!-- pr_agent:<name> -->` would trip the whole-body guards and freeze the section."""
     content = _DELIMITER_LIKE_RE.sub("", content)
     return f"<!-- pr_agent:{name}:start -->\n{content}\n<!-- pr_agent:{name}:end -->"
 
@@ -138,7 +141,7 @@ class PRDescription:
         self.vars = {
             "title": self.git_provider.pr.title,
             "branch": self.git_provider.get_pr_branch(),
-            "description": self.git_provider.get_pr_description(full=False),
+            "description": self._prompt_description(),
             "language": self.main_pr_language,
             "diff": "",  # empty diff for initial calculation
             "extra_instructions": get_settings().pr_description.extra_instructions,
@@ -815,6 +818,20 @@ class PRDescription:
         return bool(get_settings().pr_description.get("use_description_markers", False)
                     and get_settings().pr_description.get("refresh_description_markers", False))
 
+    def _prompt_description(self) -> str:
+        """Return the previous description for the prompt: the user-owned text only.
+
+        With marker refresh the published body carries delimited generated sections, and get_user_description()
+        would return "" for it; strip the generated sections and the recognition comment instead."""
+        if not self._refresh_markers_enabled():
+            return self.git_provider.get_pr_description(full=False)
+        description = self.git_provider.get_pr_description_full() or ""
+        description = _ANY_MARKER_BLOCK_RE.sub("", description).replace(GENERATED_MARKER, "").strip()
+        max_tokens_description = get_settings().get("CONFIG.MAX_DESCRIPTION_TOKENS", None)
+        if max_tokens_description:
+            description = clip_tokens(description, max_tokens_description)
+        return description
+
     def _load_user_description(self) -> str:
         """Load the marker template from the full description when marker refresh is enabled.
 
@@ -836,8 +853,8 @@ class PRDescription:
             return body.replace(f"pr_agent:{name}", content)
         wrapped = _wrap_marker_block(name, content)
         bare_re = pattern if pattern is not None else _bare_marker_re(name)
-        # One pass over the original body: an existing delimited section or a bare marker, whichever comes
-        # first. Inserted content is never rescanned, so a generated text quoting the marker cannot nest a block.
+        # Match the original body in one pass, taking an existing delimited section or a bare marker, whichever
+        # comes first. Never rescan inserted content: generated text quoting the marker would nest a block.
         combined_re = re.compile(f"(?:{_marker_block_re(name).pattern})|(?:{bare_re.pattern})", re.DOTALL)
         return combined_re.sub(lambda _match: wrapped, body)
 
@@ -890,6 +907,9 @@ class PRDescription:
             except Exception as e:
                 get_logger().error(f"Failing to process walkthrough {self.pr_id}: {e}")
                 body = self._replace_marker(body, 'walkthrough', "")
+        elif not ai_walkthrough:
+            # No walkthrough this time: drop the one a previous refresh left behind
+            body = refresh_marker_block(body, 'walkthrough', '')
 
         # Add support for pr_agent:diagram marker (plain and HTML comment formats)
         ai_diagram = self.data.get('changes_diagram')

@@ -627,6 +627,56 @@ class TestPRDescriptionCore:
         assert second == "<!-- pr_agent:summary:start -->\nSecond\n<!-- pr_agent:summary:end -->\nOutro\n"
 
     @patch('pr_agent.tools.pr_description.get_settings')
+    def test_refresh_markers_keep_refreshing_when_generated_text_quotes_an_html_marker(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.data["description"] = "Use <!-- pr_agent:summary --> in the template"
+        obj.user_description = "pr_agent:summary\nOutro\n"
+
+        _title, first = obj._prepare_pr_answer_with_markers()
+        obj.user_description = first
+        obj.data["description"] = "Second"
+        _title, second = obj._prepare_pr_answer_with_markers()
+
+        assert "<!-- pr_agent:summary -->" not in first
+        assert second == "<!-- pr_agent:summary:start -->\nSecond\n<!-- pr_agent:summary:end -->\nOutro\n"
+
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_refresh_markers_drop_a_stale_walkthrough_when_none_is_generated(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.data.pop("pr_files", None)
+        obj.user_description = (
+            "Intro\n<!-- pr_agent:walkthrough:start -->\n<table>old</table>\n<!-- pr_agent:walkthrough:end -->\nOutro\n"
+        )
+
+        _title, body = obj._prepare_pr_answer_with_markers()
+
+        assert body == "Intro\n\nOutro\n"
+
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_prompt_description_strips_generated_sections_only_when_refreshing(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        settings.get.side_effect = lambda key, default=None: default
+        mock_get_settings.return_value = settings
+        obj.git_provider.get_pr_description_full.return_value = (
+            "<!-- pr-agent-generated -->\nJira: ABC-1\n\n"
+            "<!-- pr_agent:summary:start -->\ngenerated\n<!-- pr_agent:summary:end -->\n\n"
+            "<!-- pr_agent:walkthrough:start -->\n<table>x</table>\n<!-- pr_agent:walkthrough:end -->\nOutro\n"
+        )
+        obj.git_provider.get_pr_description.return_value = "legacy"
+
+        assert obj._prompt_description() == "Jira: ABC-1\n\n\n\n\nOutro"
+
+        settings.pr_description.get.side_effect = lambda key, default=None: {
+            "use_description_markers": True,
+            "refresh_description_markers": False,
+        }.get(key, default)
+
+        assert obj._prompt_description() == "legacy"
+        obj.git_provider.get_pr_description.assert_called_with(full=False)
+
+    @patch('pr_agent.tools.pr_description.get_settings')
     def test_refresh_markers_disabled_summary_removes_the_delimited_section(self, mock_get_settings):
         obj, settings = self._marker_instance(refresh=True)
         settings.pr_description.get.side_effect = lambda key, default=None: {
