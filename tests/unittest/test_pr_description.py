@@ -611,6 +611,22 @@ class TestPRDescriptionCore:
         assert twice == once
 
     @patch('pr_agent.tools.pr_description.get_settings')
+    def test_refresh_markers_do_not_nest_when_generated_text_quotes_the_marker(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.data["description"] = "Documents the pr_agent:summary marker"
+        obj.user_description = "pr_agent:summary\nOutro\n"
+
+        _title, first = obj._prepare_pr_answer_with_markers()
+        obj.user_description = first
+        obj.data["description"] = "Second"
+        _title, second = obj._prepare_pr_answer_with_markers()
+
+        assert first == ("<!-- pr_agent:summary:start -->\nDocuments the pr_agent:summary marker\n"
+                         "<!-- pr_agent:summary:end -->\nOutro\n")
+        assert second == "<!-- pr_agent:summary:start -->\nSecond\n<!-- pr_agent:summary:end -->\nOutro\n"
+
+    @patch('pr_agent.tools.pr_description.get_settings')
     def test_refresh_markers_disabled_summary_removes_the_delimited_section(self, mock_get_settings):
         obj, settings = self._marker_instance(refresh=True)
         settings.pr_description.get.side_effect = lambda key, default=None: {

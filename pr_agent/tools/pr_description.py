@@ -332,10 +332,17 @@ class PRDescription:
         self.description_failed_chunk_count = 0
         self.description_failed_files = []
         if get_settings().pr_description.use_description_markers and 'pr_agent:' not in self.user_description:
-            get_logger().info(
-                "Markers were enabled, but user description does not contain "
-                "markers. Skipping AI prediction"
-            )
+            if self._refresh_markers_enabled():
+                get_logger().info(
+                    "Markers were enabled, but the description contains neither pr_agent:* markers nor delimited "
+                    "sections; a description filled before refresh_description_markers was enabled keeps its "
+                    "content until the markers are re-inserted. Skipping AI prediction"
+                )
+            else:
+                get_logger().info(
+                    "Markers were enabled, but user description does not contain "
+                    "markers. Skipping AI prediction"
+                )
             return None
 
         raw_prompt_vars = getattr(self, "_raw_prompt_vars", getattr(self, "vars", None))
@@ -828,9 +835,11 @@ class PRDescription:
                 return pattern.sub(lambda _match: content, body)
             return body.replace(f"pr_agent:{name}", content)
         wrapped = _wrap_marker_block(name, content)
-        body = _marker_block_re(name).sub(lambda _match: wrapped, body)
         bare_re = pattern if pattern is not None else _bare_marker_re(name)
-        return bare_re.sub(lambda _match: wrapped, body)
+        # One pass over the original body: an existing delimited section or a bare marker, whichever comes
+        # first. Inserted content is never rescanned, so a generated text quoting the marker cannot nest a block.
+        combined_re = re.compile(f"(?:{_marker_block_re(name).pattern})|(?:{bare_re.pattern})", re.DOTALL)
+        return combined_re.sub(lambda _match: wrapped, body)
 
     def _prepare_pr_answer_with_markers(self) -> Tuple[str, str]:
         get_logger().info(f"Using description marker replacements {self.pr_id}")
