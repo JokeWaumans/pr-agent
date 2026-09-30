@@ -64,7 +64,18 @@ def _marker_block_re(name: str) -> re.Pattern:
     return re.compile(rf"<!--\s*pr_agent:{name}:start\s*-->.*?<!--\s*pr_agent:{name}:end\s*-->", re.DOTALL)
 
 
+_DELIMITER_LIKE_RE = re.compile(r"<!--\s*pr_agent:\w+:(?:start|end)\s*-->")
+
+
+def _bare_marker_re(name: str) -> re.Pattern:
+    """Match the plain `pr_agent:<name>` token, but not the token inside a start/end delimiter comment."""
+    return re.compile(rf"pr_agent:{name}(?![:\w])")
+
+
 def _wrap_marker_block(name: str, content: str) -> str:
+    """Wrap `content` in the start/end delimiter comments, dropping any delimiter-like comment it quotes so the
+    block still ends at its real delimiter on the next refresh."""
+    content = _DELIMITER_LIKE_RE.sub("", content)
     return f"<!-- pr_agent:{name}:start -->\n{content}\n<!-- pr_agent:{name}:end -->"
 
 
@@ -209,39 +220,11 @@ class PRDescription:
             get_logger().debug("PR output", artifact={"title": pr_title, "body": pr_body})
 
             # Add help text if gfm_markdown is supported
-            help_text_present = refresh_markers and "Describe tool usage guide" in pr_body
-            help_comment_present = refresh_markers and "Need help?" in pr_body
-            if (self.git_provider.is_supported("gfm_markdown") and get_settings().pr_description.enable_help_text
-                    and not help_text_present):
-                pr_body += (
-                    "<hr>\n\n<details> <summary><strong>✨ Describe tool usage guide:</strong>"
-                    "</summary><hr> \n\n"
-                )
-                pr_body += HelpMessage.get_describe_usage_guide()
-                pr_body += "\n</details>\n"
-            elif (get_settings().pr_description.enable_help_comment and self.git_provider.is_supported("gfm_markdown")
-                    and not help_comment_present):
-                if self.git_provider.supports_inline_help_footer():
-                    pr_body += (
-                        '\n\n___\n\n> <details> <summary>  Need help?</summary>'
-                        '<li>Type <code>/help how to ...</code> in the comments thread '
-                        'for any questions about PR-Agent usage.</li>'
-                        '<li>Check out the '
-                        '<a href="https://docs.pr-agent.ai/usage-guide/">documentation</a> '
-                        'for more information.</li></details>'
-                    )
-                else:  # bullets separated by <br>, for providers whose footer cannot inline a list
-                    pr_body += (
-                        "\n\n___\n\n<details><summary>Need help?</summary>"
-                        "- Type <code>/help how to ...</code> in the comments "
-                        "thread for any questions about PR-Agent usage.<br>"
-                        "- Check out the "
-                        "<a href='https://docs.pr-agent.ai/usage-guide/'>documentation</a> "
-                        "for more information.</details>"
-                    )
-                # elif get_settings().pr_description.enable_help_comment:
-                #     pr_body += '\n\n___\n\n> 💡 **PR-Agent usage**: '
-                #     Comment `/help "your question"` on any pull request to receive relevant information'
+            help_footer = self._help_footer()
+            if refresh_markers:
+                pr_body = refresh_marker_block(pr_body, "help", help_footer.strip(), append=True)
+            else:
+                pr_body += help_footer
 
             # Output the relevant configurations if enabled
             if get_settings().get('config', {}).get('output_relevant_configurations', False):
@@ -788,15 +771,48 @@ class PRDescription:
             get_logger().error(f"Error converting labels to original case {self.pr_id}: {e}")
         return pr_labels
 
+    def _help_footer(self) -> str:
+        """Return the describe usage guide or the short help footer, or "" when neither is enabled."""
+        if not self.git_provider.is_supported("gfm_markdown"):
+            return ""
+        if get_settings().pr_description.enable_help_text:
+            return (
+                "<hr>\n\n<details> <summary><strong>✨ Describe tool usage guide:</strong>"
+                "</summary><hr> \n\n"
+                + HelpMessage.get_describe_usage_guide()
+                + "\n</details>\n"
+            )
+        if get_settings().pr_description.enable_help_comment:
+            if self.git_provider.supports_inline_help_footer():
+                return (
+                    '\n\n___\n\n> <details> <summary>  Need help?</summary>'
+                    '<li>Type <code>/help how to ...</code> in the comments thread '
+                    'for any questions about PR-Agent usage.</li>'
+                    '<li>Check out the '
+                    '<a href="https://docs.pr-agent.ai/usage-guide/">documentation</a> '
+                    'for more information.</li></details>'
+                )
+            # bullets separated by <br>, for providers whose footer cannot inline a list
+            return (
+                "\n\n___\n\n<details><summary>Need help?</summary>"
+                "- Type <code>/help how to ...</code> in the comments "
+                "thread for any questions about PR-Agent usage.<br>"
+                "- Check out the "
+                "<a href='https://docs.pr-agent.ai/usage-guide/'>documentation</a> "
+                "for more information.</details>"
+            )
+        return ""
+
     @staticmethod
     def _refresh_markers_enabled() -> bool:
         return bool(get_settings().pr_description.get("use_description_markers", False)
                     and get_settings().pr_description.get("refresh_description_markers", False))
 
     def _load_user_description(self) -> str:
-        """In refreshable-marker mode the whole existing description is the template (its generated sections are
-        delimited and replaced in place), so the pr-agent-generated heuristics of get_user_description() must not
-        strip it down to an empty string on the second run."""
+        """Load the marker template from the full description when marker refresh is enabled.
+
+        The generated sections are then delimited and replaced in place, so the pr-agent-generated heuristics
+        of get_user_description() must not strip the body down to an empty string on the second run."""
         if self._refresh_markers_enabled():
             return (self.git_provider.get_pr_description_full() or "").strip()
         return self.git_provider.get_user_description()
@@ -811,13 +827,10 @@ class PRDescription:
             if pattern is not None:
                 return pattern.sub(lambda _match: content, body)
             return body.replace(f"pr_agent:{name}", content)
-        block_re = _marker_block_re(name)
         wrapped = _wrap_marker_block(name, content)
-        if block_re.search(body):
-            return block_re.sub(lambda _match: wrapped, body)
-        if pattern is not None:
-            return pattern.sub(lambda _match: wrapped, body)
-        return body.replace(f"pr_agent:{name}", wrapped)
+        body = _marker_block_re(name).sub(lambda _match: wrapped, body)
+        bare_re = pattern if pattern is not None else _bare_marker_re(name)
+        return bare_re.sub(lambda _match: wrapped, body)
 
     def _prepare_pr_answer_with_markers(self) -> Tuple[str, str]:
         get_logger().info(f"Using description marker replacements {self.pr_id}")
@@ -873,7 +886,10 @@ class PRDescription:
         ai_diagram = self.data.get('changes_diagram')
         if ai_diagram:
             body = self._replace_marker(body, 'diagram', ai_diagram,
-                                        pattern=re.compile(r'<!--\s*pr_agent:diagram\s*-->|pr_agent:diagram'))
+                                        pattern=re.compile(r'<!--\s*pr_agent:diagram\s*-->|pr_agent:diagram(?![:\w])'))
+        else:
+            # No diagram this time: drop the one a previous refresh left behind
+            body = refresh_marker_block(body, 'diagram', '')
 
         return title, body
 

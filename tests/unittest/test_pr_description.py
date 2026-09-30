@@ -548,6 +548,69 @@ class TestPRDescriptionCore:
         assert "old" not in body
 
     @patch('pr_agent.tools.pr_description.get_settings')
+    def test_refresh_markers_fills_bare_markers_added_next_to_an_existing_section(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.user_description = (
+            "<!-- pr_agent:summary:start -->\nstale\n<!-- pr_agent:summary:end -->\n"
+            "Also here: pr_agent:summary\n"
+            "<!-- pr_agent:diagram:start -->\nold\n<!-- pr_agent:diagram:end -->\npr_agent:diagram\n"
+        )
+
+        _title, body = obj._prepare_pr_answer_with_markers()
+
+        assert body.count("<!-- pr_agent:summary:start -->") == 2
+        assert body.count("<!-- pr_agent:summary:end -->") == 2
+        assert body.count("Fixes the cache invalidation bug.") == 2
+        assert body.count("<!-- pr_agent:diagram:start -->") == 2
+        assert body.count("```mermaid") == 2
+        assert "stale" not in body and "old" not in body
+
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_refresh_markers_drops_a_stale_diagram_when_none_is_generated(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.data["changes_diagram"] = ""
+        obj.user_description = "Intro\n<!-- pr_agent:diagram:start -->\nold\n<!-- pr_agent:diagram:end -->\nOutro\n"
+
+        _title, body = obj._prepare_pr_answer_with_markers()
+
+        assert body == "Intro\n\nOutro\n"
+
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_refresh_markers_survive_generated_text_quoting_a_delimiter(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.data["description"] = "Mentions <!-- pr_agent:summary:end --> in prose"
+        obj.user_description = "pr_agent:summary\nOutro\n"
+
+        _title, first = obj._prepare_pr_answer_with_markers()
+        obj.user_description = first
+        obj.data["description"] = "Second"
+        _title, second = obj._prepare_pr_answer_with_markers()
+
+        assert first.count("<!-- pr_agent:summary:end -->") == 1
+        assert second == "<!-- pr_agent:summary:start -->\nSecond\n<!-- pr_agent:summary:end -->\nOutro\n"
+
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_help_footer_is_a_refreshable_block_that_ignores_user_text(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        settings.pr_description.enable_help_text = False
+        settings.pr_description.enable_help_comment = True
+        mock_get_settings.return_value = settings
+        obj.git_provider.is_supported.return_value = True
+        obj.git_provider.supports_inline_help_footer.return_value = True
+        body = "Intro asking: Need help?\n"
+
+        footer = obj._help_footer()
+        once = refresh_marker_block(body, "help", footer.strip(), append=True)
+        twice = refresh_marker_block(once, "help", footer.strip(), append=True)
+
+        assert "/help how to" in once
+        assert once.count("<!-- pr_agent:help:start -->") == 1
+        assert twice == once
+
+    @patch('pr_agent.tools.pr_description.get_settings')
     def test_refresh_markers_disabled_summary_removes_the_delimited_section(self, mock_get_settings):
         obj, settings = self._marker_instance(refresh=True)
         settings.pr_description.get.side_effect = lambda key, default=None: {
