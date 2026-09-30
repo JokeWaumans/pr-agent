@@ -66,6 +66,18 @@ def _marker_block_re(name: str) -> re.Pattern:
 
 _DELIMITER_LIKE_RE = re.compile(r"<!--\s*pr_agent:\w+(?::(?:start|end))?\s*-->")
 _ANY_MARKER_BLOCK_RE = re.compile(r"<!--\s*pr_agent:\w+:start\s*-->.*?<!--\s*pr_agent:\w+:end\s*-->", re.DOTALL)
+_CONTENT_MARKER_RE = re.compile(r"pr_agent:(?:type|summary|walkthrough|diagram)\b")
+_NON_CONTENT_BLOCK_RE = re.compile(
+    r"<!--\s*pr_agent:(?!(?:type|summary|walkthrough|diagram):)\w+:start\s*-->.*?<!--\s*pr_agent:\w+:end\s*-->",
+    re.DOTALL,
+)
+
+
+def has_content_markers(text: str) -> bool:
+    """Return whether `text` still carries a marker for a generated content section, in bare, HTML-comment or
+    delimited form. Ignore the footer blocks (help, coverage, ...) that refresh mode adds, so a description whose
+    content markers were all removed by hand no longer triggers a model call."""
+    return bool(_CONTENT_MARKER_RE.search(_NON_CONTENT_BLOCK_RE.sub("", text)))
 
 
 def _bare_marker_re(name: str) -> re.Pattern:
@@ -138,6 +150,8 @@ class PRDescription:
             get_settings().pr_description.get("enable_pr_diagram", False)
             and self.git_provider.is_supported("gfm_markdown")
         )
+        self.user_description = self._load_user_description()
+
         self.vars = {
             "title": self.git_provider.pr.title,
             "branch": self.git_provider.get_pr_branch(),
@@ -160,8 +174,6 @@ class PRDescription:
             "enable_pr_diagram": enable_pr_diagram,
             "enable_pr_description": get_settings().pr_description.get("enable_pr_description", True),
         }
-
-        self.user_description = self._load_user_description()
 
         # Initialize the token handler
         self.token_handler = TokenHandler(
@@ -229,13 +241,7 @@ class PRDescription:
             else:
                 pr_body += help_footer
 
-            # Output the relevant configurations if enabled
-            if get_settings().get('config', {}).get('output_relevant_configurations', False):
-                pr_body += show_relevant_configurations(relevant_section='pr_description')
-
-            # Output the agent run details (model, tokens, time cost) if enabled
-            if get_settings().get('config', {}).get('output_run_details', False):
-                pr_body += show_run_details(self.git_provider.is_supported("gfm_markdown"))
+            pr_body = self._append_run_footers(pr_body, refresh_markers)
 
             if get_settings().config.publish_output:
                 # Emit to the optional external sinks before touching the provider, so a sink
@@ -334,7 +340,7 @@ class PRDescription:
         self.description_total_chunk_count = 0
         self.description_failed_chunk_count = 0
         self.description_failed_files = []
-        if get_settings().pr_description.use_description_markers and 'pr_agent:' not in self.user_description:
+        if get_settings().pr_description.use_description_markers and not self._template_has_markers():
             if self._refresh_markers_enabled():
                 get_logger().info(
                     "Markers were enabled, but the description contains neither pr_agent:* markers nor delimited "
@@ -713,8 +719,9 @@ class PRDescription:
         self.data = load_yaml(self.prediction.strip(), keys_fix_yaml=self.keys_fix)
         self._validate_description_schema(self.data)
 
-        if get_settings().pr_description.add_original_user_description and self.user_description:
-            self.data["User Description"] = self.user_description
+        user_description = self._user_authored_description()
+        if get_settings().pr_description.add_original_user_description and user_description:
+            self.data["User Description"] = user_description
 
         # re-order keys
         if 'User Description' in self.data:
@@ -818,6 +825,34 @@ class PRDescription:
         return bool(get_settings().pr_description.get("use_description_markers", False)
                     and get_settings().pr_description.get("refresh_description_markers", False))
 
+    def _append_run_footers(self, pr_body: str, refresh_markers: bool) -> str:
+        """Append the optional relevant-configurations and run-details sections.
+
+        In refresh mode keep each in its own delimited block so later runs replace it, or remove it when the
+        option was switched off."""
+        config_section = run_details = ""
+        if get_settings().get('config', {}).get('output_relevant_configurations', False):
+            config_section = show_relevant_configurations(relevant_section='pr_description')
+        if get_settings().get('config', {}).get('output_run_details', False):
+            run_details = show_run_details(self.git_provider.is_supported("gfm_markdown"))
+        if not refresh_markers:
+            return pr_body + config_section + run_details
+        pr_body = refresh_marker_block(pr_body, "config", config_section.strip(), append=True)
+        return refresh_marker_block(pr_body, "run_details", run_details.strip(), append=True)
+
+    def _user_authored_description(self) -> str:
+        """Return the user-owned part of the template: the loaded description without the generated
+        sections and the recognition comment."""
+        if not self._refresh_markers_enabled():
+            return self.user_description
+        return _ANY_MARKER_BLOCK_RE.sub("", self.user_description or "").replace(GENERATED_MARKER, "").strip()
+
+    def _template_has_markers(self) -> bool:
+        """Return whether the loaded template still asks for generated content."""
+        if self._refresh_markers_enabled():
+            return has_content_markers(self.user_description or "")
+        return 'pr_agent:' in self.user_description
+
     def _prompt_description(self) -> str:
         """Return the previous description for the prompt: the user-owned text only.
 
@@ -825,8 +860,7 @@ class PRDescription:
         would return "" for it; strip the generated sections and the recognition comment instead."""
         if not self._refresh_markers_enabled():
             return self.git_provider.get_pr_description(full=False)
-        description = self.git_provider.get_pr_description_full() or ""
-        description = _ANY_MARKER_BLOCK_RE.sub("", description).replace(GENERATED_MARKER, "").strip()
+        description = self._user_authored_description()
         max_tokens_description = get_settings().get("CONFIG.MAX_DESCRIPTION_TOKENS", None)
         if max_tokens_description:
             description = clip_tokens(description, max_tokens_description)
@@ -897,6 +931,9 @@ class PRDescription:
             # AI summary disabled by config - remove the marker instead of leaving it unreplaced
             body = refresh_marker_block(body, 'summary', '')
             body = re.sub(r'<!--\s*pr_agent:summary\s*-->|pr_agent:summary', '', body)
+        elif not ai_summary:
+            # No summary this time: drop the one a previous refresh left behind
+            body = refresh_marker_block(body, 'summary', '')
 
         ai_walkthrough = self.data.get('pr_files')
         walkthrough_gfm = ""

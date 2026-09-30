@@ -15,6 +15,7 @@ from pr_agent.tools.pr_description import (
     _longest_diagram_chain,
     _parse_diagram_edges,
     apply_diagram_direction,
+    has_content_markers,
     refresh_marker_block,
     sanitize_diagram,
     with_generated_marker,
@@ -659,7 +660,7 @@ class TestPRDescriptionCore:
         obj, settings = self._marker_instance(refresh=True)
         settings.get.side_effect = lambda key, default=None: default
         mock_get_settings.return_value = settings
-        obj.git_provider.get_pr_description_full.return_value = (
+        obj.user_description = (
             "<!-- pr-agent-generated -->\nJira: ABC-1\n\n"
             "<!-- pr_agent:summary:start -->\ngenerated\n<!-- pr_agent:summary:end -->\n\n"
             "<!-- pr_agent:walkthrough:start -->\n<table>x</table>\n<!-- pr_agent:walkthrough:end -->\nOutro\n"
@@ -675,6 +676,78 @@ class TestPRDescriptionCore:
 
         assert obj._prompt_description() == "legacy"
         obj.git_provider.get_pr_description.assert_called_with(full=False)
+
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_refresh_markers_drop_a_stale_summary_when_none_is_generated(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.data["description"] = ""
+        obj.user_description = "Intro\n<!-- pr_agent:summary:start -->\nold\n<!-- pr_agent:summary:end -->\nOutro\n"
+
+        _title, body = obj._prepare_pr_answer_with_markers()
+
+        assert body == "Intro\n\nOutro\n"
+
+    def test_has_content_markers_ignores_footer_blocks_and_guide_text(self):
+        assert has_content_markers("pr_agent:type")
+        assert has_content_markers("<!-- pr_agent:walkthrough -->")
+        assert has_content_markers("<!-- pr_agent:summary:start -->\nx\n<!-- pr_agent:summary:end -->")
+        assert not has_content_markers("plain text mentioning pr_agent:marker_name")
+        assert not has_content_markers(
+            "<!-- pr_agent:help:start -->\nreplaces pr_agent:summary and pr_agent:type\n<!-- pr_agent:help:end -->\n"
+            "<!-- pr_agent:coverage:start -->\n1 of 2 failed\n<!-- pr_agent:coverage:end -->\n"
+        )
+
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_user_authored_description_strips_generated_sections_only_when_refreshing(self, mock_get_settings):
+        obj, settings = self._marker_instance(refresh=True)
+        mock_get_settings.return_value = settings
+        obj.user_description = (
+            "<!-- pr-agent-generated -->\nJira: ABC-1\n"
+            "<!-- pr_agent:summary:start -->\ngenerated\n<!-- pr_agent:summary:end -->\n"
+            "<!-- pr_agent:help:start -->\nguide\n<!-- pr_agent:help:end -->\n"
+        )
+
+        assert obj._user_authored_description() == "Jira: ABC-1"
+        assert obj._template_has_markers()
+
+        obj.user_description = "Jira: ABC-1\n<!-- pr_agent:help:start -->\nguide\n<!-- pr_agent:help:end -->\n"
+        assert not obj._template_has_markers()
+
+        settings.pr_description.get.side_effect = lambda key, default=None: {
+            "use_description_markers": True,
+            "refresh_description_markers": False,
+        }.get(key, default)
+        obj.user_description = "Jira: ABC-1\npr_agent:summary\n"
+        assert obj._user_authored_description() == obj.user_description
+        assert obj._template_has_markers()
+        obj.user_description = "Jira: ABC-1\n"
+        assert not obj._template_has_markers()
+
+    @patch('pr_agent.tools.pr_description.show_run_details', return_value="\n\nrun details")
+    @patch('pr_agent.tools.pr_description.show_relevant_configurations', return_value="\n\nconfig")
+    @patch('pr_agent.tools.pr_description.get_settings')
+    def test_run_footers_are_refreshable_blocks(self, mock_get_settings, _configs, _details):
+        obj, settings = self._marker_instance(refresh=True)
+        settings.get.side_effect = lambda key, default=None: {
+            'config': {'output_relevant_configurations': True, 'output_run_details': True},
+        }.get(key, default)
+        mock_get_settings.return_value = settings
+
+        once = obj._append_run_footers("Intro\n", refresh_markers=True)
+        twice = obj._append_run_footers(once, refresh_markers=True)
+        plain = obj._append_run_footers("Intro\n", refresh_markers=False)
+
+        assert once.count("<!-- pr_agent:config:start -->") == 1
+        assert once.count("<!-- pr_agent:run_details:start -->") == 1
+        assert twice == once
+        assert plain == "Intro\n\n\nconfig\n\nrun details"
+
+        settings.get.side_effect = lambda key, default=None: {
+            'config': {'output_relevant_configurations': False, 'output_run_details': False},
+        }.get(key, default)
+
+        assert obj._append_run_footers(once, refresh_markers=True).strip() == "Intro"
 
     @patch('pr_agent.tools.pr_description.get_settings')
     def test_refresh_markers_disabled_summary_removes_the_delimited_section(self, mock_get_settings):
