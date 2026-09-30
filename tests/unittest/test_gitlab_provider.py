@@ -1198,18 +1198,26 @@ class TestGitLabProvider:
             'start': {'new_line': None, 'old_line': 3},
             'end': {'new_line': None, 'old_line': 5},
         }
+        renamed = _thread_note(line_key=None)
+        renamed['position'].update({'old_path': 'src/old_name.py', 'new_path': 'src/new_name.py'})
+        renamed['position']['line_range'] = {
+            'start': {'new_line': 7, 'old_line': None},
+            'end': {'new_line': 8, 'old_line': None},
+        }
 
         gitlab_provider.mr = MagicMock()
         gitlab_provider.mr.discussions.list.return_value = [
             _thread([note], discussion_id='range'),
             _thread([deletion], discussion_id='deleted'),
+            _thread([renamed], discussion_id='renamed'),
         ]
 
         discussions = json.loads(gitlab_provider.get_code_suggestion_thread_context())
 
-        assert [(d["thread_id"], d["start_line"], d["end_line"]) for d in discussions] == [
-            ("deleted", 3, 5),
-            ("range", 10, 14),
+        assert [(d["thread_id"], d["file"], d["start_line"], d["end_line"]) for d in discussions] == [
+            ("renamed", "src/new_name.py", 7, 8),
+            ("deleted", "src/app.py", 3, 5),
+            ("range", "src/app.py", 10, 14),
         ]
 
     def test_get_code_suggestion_thread_context_truncates_messages_and_replies(self, gitlab_provider):

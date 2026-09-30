@@ -130,21 +130,26 @@ def _eligible_own_inline_thread(discussion, own_user_id: int):
     return position
 
 
-def _suggestion_thread_lines(position: dict) -> tuple:
-    """(start, end) lines of an inline note: the multi-line `line_range` when GitLab reports one,
-    else the single anchored line. New-file lines win over old-file lines. (None, None) if unanchored."""
+def _suggestion_thread_location(position: dict) -> tuple:
+    """Return (path, start, end) of an inline note, or (None, None, None) when it is not anchored to a line.
+
+    Use the multi-line `line_range` when GitLab reports one, else the single anchored line. Prefer new-file
+    coordinates over old-file ones and pick the path from the same side, so renamed files map correctly.
+    """
     line_range = position.get('line_range') if isinstance(position.get('line_range'), dict) else {}
-    edges = []
-    for key in ('start', 'end'):
-        edge = line_range.get(key) if isinstance(line_range.get(key), dict) else {}
-        edges.append(edge.get('new_line') or edge.get('old_line'))
-    start, end = edges
-    if isinstance(start, int) and isinstance(end, int):
-        return min(start, end), max(start, end)
-    line = position.get('new_line') or position.get('old_line')
-    if not isinstance(line, int):
-        return None, None
-    return line, line
+    for side, path_key in (('new_line', 'new_path'), ('old_line', 'old_path')):
+        edges = []
+        for key in ('start', 'end'):
+            edge = line_range.get(key) if isinstance(line_range.get(key), dict) else {}
+            edges.append(edge.get(side))
+        start, end = edges
+        if isinstance(start, int) and isinstance(end, int):
+            return position.get(path_key), min(start, end), max(start, end)
+    for side, path_key in (('new_line', 'new_path'), ('old_line', 'old_path')):
+        line = position.get(side)
+        if isinstance(line, int):
+            return position.get(path_key), line, line
+    return None, None, None
 
 
 def _flagged_line_removed(position: dict, removed_lines: dict) -> bool:
@@ -1188,7 +1193,7 @@ class GitLabProvider(GitProvider):
             opener = notes[0] if notes and isinstance(notes[0], dict) else {}
             body = opener.get('body')
             position = opener.get('position') if isinstance(opener.get('position'), dict) else {}
-            start_line, end_line = _suggestion_thread_lines(position)
+            path, start_line, end_line = _suggestion_thread_location(position)
             if not isinstance(body, str) or not is_agent_inline_comment(body) or start_line is None:
                 continue
             try:
@@ -1204,7 +1209,7 @@ class GitLabProvider(GitProvider):
             yield CodeSuggestionThread(
                 thread_id=discussion.id,
                 status=self._code_suggestion_thread_status(opener),
-                file=position.get('new_path') if position.get('new_line') else position.get('old_path'),
+                file=path,
                 start_line=start_line,
                 end_line=end_line,
                 suggestion=body,
@@ -1213,8 +1218,9 @@ class GitLabProvider(GitProvider):
             )
 
     def _code_suggestion_thread_status(self, opener: dict) -> str:
-        """`applied` (suggestion applied through the GitLab UI), `auto_resolved` (closed by PR-Agent itself,
-        e.g. the outdated/fixed thread sweeps), `resolved` (closed by a developer) or `open`."""
+        """Return `applied` (suggestion applied through the GitLab UI), `auto_resolved` (closed by the verified
+        PR-Agent user, e.g. the outdated/fixed thread sweeps), `resolved` (closed by anyone else, or by an
+        unverifiable user) or `open`."""
         suggestions = opener.get('suggestions') or []
         if any(isinstance(suggestion, dict) and suggestion.get('applied') for suggestion in suggestions):
             return "applied"

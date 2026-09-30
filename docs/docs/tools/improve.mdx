@@ -270,9 +270,10 @@ current file. Existing terminal statuses are preserved.
 GitLab and Azure DevOps also include earlier suggestion threads and their replies as context on the next suggestions
 pass. A regular `/improve` reviews the full current pull request while avoiding issues that were already raised,
 addressed, rejected, or deferred. Use `/improve -i` to review only changes since the previous suggestions pass.
-On GitLab each thread carries a status: `open`, `resolved` (closed by a developer), `auto_resolved` (closed by
-PR-Agent itself, for example through `resolve_outdated_inline_threads` or `auto_resolve_fixed_inline_threads`, so
-the finding may still apply) or `applied` (the suggestion was applied through the GitLab UI).
+On GitLab each thread carries a status: `open`, `auto_resolved` (closed by the authenticated PR-Agent user, for
+example through `resolve_outdated_inline_threads` or `auto_resolve_fixed_inline_threads`, so the finding may still
+apply), `resolved` (closed by anyone else, or when the PR-Agent user could not be verified) or `applied` (the
+suggestion was applied through the GitLab UI).
 
 Duplicate suppression and applied-suggestion reconciliation require `persistent_inline_comments`. Discussion context
 and threaded questions remain available without it.
